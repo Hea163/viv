@@ -1,4 +1,3 @@
-# viv
 function results = riser_viv_analysis()% 深水干树圆筒平台钻井立管涡激-参激耦合振动与疲劳分析 
     try % 主程序入口
         %% 1. 参数初始化
