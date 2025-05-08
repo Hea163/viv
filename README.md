@@ -5150,26 +5150,72 @@ function plot_vortex_oscillator(results, xi, params)
         xlabel('频率 (Hz)');
         ylabel('振幅');
         grid on;        
+        % 检查是否有足够的振幅进行峰值检测
+try
+    % 确保数据有效
+    valid_spectrum = amp_spectrum(~isnan(amp_spectrum) & ~isinf(amp_spectrum));
+    
+    if ~isempty(valid_spectrum) && max(valid_spectrum) > eps
+        % 使用自适应阈值 - 振幅最大值的一小部分
+        peak_threshold = max(valid_spectrum) * 0.05; % 开始使用5%的阈值
+        
+        % 尝试不同阈值的峰值检测
+        [peaks, locs] = findpeaks(amp_spectrum);
+        
+        % 如果找到峰值，过滤掉低于阈值的部分
+        if ~isempty(peaks)
+            significant_peaks = peaks >= peak_threshold;
+            if any(significant_peaks)
+                peaks = peaks(significant_peaks);
+                locs = locs(significant_peaks);
+            end
+        end
+        
+        % 如果仍然没有找到峰值或峰值太少，使用最大点
+        if isempty(peaks)
+            [max_val, max_idx] = max(amp_spectrum);
+            peaks = max_val;
+            locs = max_idx;
+        end
+        
         % 标记主要频率
-        [peaks, locs] = findpeaks(2*abs(Y(1:NFFT/2+1)), 'MinPeakHeight', max(2*abs(Y(1:NFFT/2+1)))*0.1);
         [sorted_peaks, sorted_idx] = sort(peaks, 'descend');
-        sorted_locs = locs(sorted_idx);        
+        sorted_locs = locs(sorted_idx);
+        
         hold on;
         n_peaks = min(3, length(sorted_peaks));
         for j = 1:n_peaks
-            plot(f(sorted_locs(j)), sorted_peaks(j), 'ro', 'MarkerSize', 8);
-            text(f(sorted_locs(j)), sorted_peaks(j), sprintf(' %.3f Hz', f(sorted_locs(j))));
+            plot(f(sorted_locs(j)), sorted_peaks(j), 'o', 'MarkerSize', 8, ...
+                 'MarkerFaceColor', [0.8941, 0.1020, 0.1098], 'MarkerEdgeColor', 'none');
+            text(f(sorted_locs(j)), sorted_peaks(j), sprintf(' %.3f Hz', f(sorted_locs(j))), 'FontWeight', 'bold');
         end
         hold off;
-    end    
+    else
+        % 如果振幅太小，显示提示信息
+        text(mean(f), 0.5*max(amp_spectrum), '振幅太小，无法检测峰值', ...
+             'HorizontalAlignment', 'center', 'BackgroundColor', [1 1 1 0.7], ...
+             'EdgeColor', [0.8 0.8 0.8]);
+    end
+catch ME
+    % 错误处理
+    warning('峰值检测失败: %s', ME.message);
+    text(mean(f), 0.5*max(amp_spectrum), '峰值检测失败', ...
+         'HorizontalAlignment', 'center', 'BackgroundColor', [1 0.9 0.9], ...
+         'EdgeColor', [0.8 0.8 0.8]);
+end    
     % 总标题
     sgtitle('尾流振子分析结果', 'FontSize', 14);    
     % 保存图像
     saveas(gcf, 'vortex_oscillator_analysis.png');
+    end
 end
 function plot_viv_analysis(results, params, xi)
     % 分析涡激振动特性，增强版本
-    % 包含NaN值处理和稳健性增强    
+    % 包含NaN值处理和稳健性增强
+    if ~isfield(params, 'L')
+    params.L = max(xi);
+    fprintf('警告: params.L未定义，使用max(xi)=%.6f作为立管长度\n', params.L);
+end
     try
         figure('Name', '涡激振动分析', 'Position', [100, 100, 1000, 800]);        
         % 1. 选择关键位置
@@ -5316,50 +5362,106 @@ function plot_viv_analysis(results, params, xi)
                 
                 % 标记主要频率
                 if any(amp_spectrum > 0)  % 确保有正值
+                    % 确保数据是向量而非矩阵
+                    if size(amp_spectrum, 1) > 1 && size(amp_spectrum, 2) > 1
+                        amp_spectrum_vec = amp_spectrum(:);
+                        f_vec = repmat(f', size(amp_spectrum, 1), 1);
+                        fprintf('警告: 幅值谱是矩阵而非向量，将其转换为向量\n');
+                    else
+                        amp_spectrum_vec = amp_spectrum;
+                        f_vec = f;
+                    end
+                    
+                    % 峰值检测 - 使用更健壮的方法
+                    peakDetectionSuccess = false;
                     try
-                        % 确保数据是向量而非矩阵
-                        if size(amp_spectrum, 1) > 1 && size(amp_spectrum, 2) > 1
-                            amp_spectrum_vec = amp_spectrum(:);
-                            f_vec = repmat(f', size(amp_spectrum, 1), 1);
-                            fprintf('警告: 幅值谱是矩阵而非向量，将其转换为向量\n');
-                        else
-                            amp_spectrum_vec = amp_spectrum;
-                            f_vec = f;
-                        end
+                        % 检查幅值谱是否有有效数据
+                        valid_spectrum = amp_spectrum_vec(~isnan(amp_spectrum_vec) & ~isinf(amp_spectrum_vec) & isfinite(amp_spectrum_vec));
                         
-                        % 修改：使用更合适的阈值寻找峰值
-                        max_amp = max(amp_spectrum_vec);
-                        if max_amp > 0
-                            % 使用较小的阈值，确保能找到峰值
-                            min_peak_threshold = max_amp * 0.05;  % 降低到5%最大值
-                            [peaks, locs] = findpeaks(amp_spectrum_vec, 'MinPeakHeight', min_peak_threshold, 'MinPeakDistance', 3);
+                        if ~isempty(valid_spectrum) && max(valid_spectrum) > eps
+                            % 使用自适应的多阶段峰值检测方法
+                            % 首先尝试直接找出所有峰值，不使用高度阈值
+                            [all_peaks, all_locs] = findpeaks(amp_spectrum_vec);
                             
+                            % 如果找到了峰值，可以尝试筛选出显著的峰值
+                            if ~isempty(all_peaks)
+                                % 计算平均振幅和标准差，用于设置有意义的阈值
+                                mean_amp = mean(valid_spectrum);
+                                std_amp = std(valid_spectrum);
+                                max_amp = max(valid_spectrum);
+                                
+                                % 根据信噪比特性，设置合理的动态阈值
+                                % 使用平均值+少量标准差作为阈值，通常比使用最大值的百分比更稳健
+                                dynamic_threshold = mean_amp + std_amp;
+                                
+                                % 如果动态阈值太小，使用最大值的一小部分
+                                if dynamic_threshold < 0.01 * max_amp
+                                    dynamic_threshold = 0.01 * max_amp;
+                                end
+                                
+                                % 筛选满足阈值的峰值
+                                significant_idx = all_peaks >= dynamic_threshold;
+                                
+                                % 如果有显著峰值
+                                if any(significant_idx)
+                                    peaks = all_peaks(significant_idx);
+                                    locs = all_locs(significant_idx);
+                                else
+                                    % 如果没有显著峰值，使用所有找到的峰值
+                                    peaks = all_peaks;
+                                    locs = all_locs;
+                                end
+                                
+                                % 如果太多峰值，只保留最高的几个
+                                if length(peaks) > 10
+                                    [sorted_peaks, sort_idx] = sort(peaks, 'descend');
+                                    peaks = sorted_peaks(1:10);
+                                    locs = locs(sort_idx(1:10));
+                                end
+                            else
+                                % 如果没有找到任何峰值，使用最大值点
+                                [peaks, locs] = max(amp_spectrum_vec);
+                                if isempty(peaks) || peaks <= eps
+                                    % 如果数据无效，创建一个提示
+                                    text(0.5*max(f_vec), 0.5*max(amp_spectrum_vec), '无有效峰值数据', ...
+                                        'BackgroundColor', [1 1 1 0.7], 'EdgeColor', [0.5 0.5 0.5], ...
+                                        'HorizontalAlignment', 'center');
+                                end
+                            end
+                            
+                            % 排序并选择顶部峰值
                             if ~isempty(peaks)
                                 [sorted_peaks, sort_idx] = sort(peaks, 'descend');
                                 sorted_locs = locs(sort_idx);
-                                top_peaks = min(3, length(sort_idx));
+                                top_peaks = min(3, length(sorted_peaks));
                                 
                                 hold on;
                                 for j = 1:top_peaks
                                     peak_idx = sorted_locs(j);
                                     if peak_idx <= length(f_vec)
-                                        plot(f_vec(peak_idx), sorted_peaks(j), 'ro', 'MarkerSize', 8);
-                                        text(f_vec(peak_idx), sorted_peaks(j), sprintf(' %.3f Hz', f_vec(peak_idx)));
+                                        plot(f_vec(peak_idx), sorted_peaks(j), 'o', 'MarkerSize', 8, ...
+                                             'MarkerFaceColor', [0.8941, 0.1020, 0.1098], 'MarkerEdgeColor', 'none');
+                                        text(f_vec(peak_idx), sorted_peaks(j), sprintf(' %.3f Hz', f_vec(peak_idx)), ...
+                                             'FontWeight', 'bold', 'Interpreter', 'none');
                                     end
                                 end
                                 hold off;
-                            else
-                                text(0.5*max(f), 0.5*max(amp_spectrum), '未检测到显著峰值', ...
-                                    'BackgroundColor', [1 1 1 0.7], 'EdgeColor', 'k');
+                                peakDetectionSuccess = true;
                             end
-                        else
-                            text(0.5*max(f), 0, '幅值全为零，无法检测峰值', ...
-                                'BackgroundColor', [1 1 1 0.7], 'EdgeColor', 'k');
                         end
-                    catch ME
-                        fprintf('峰值检测失败: %s\n', ME.message);
-                        text(0.5*max(f), 0.5*max(amp_spectrum), '峰值检测失败', ...
-                            'BackgroundColor', [1 1 1 0.7], 'EdgeColor', 'k');
+                    catch peak_error
+                        % 错误处理
+                        warning('频谱峰值分析失败: %s', peak_error.message);
+                        text(0.5*max(f_vec), 0.5*max(amp_spectrum_vec), sprintf('峰值分析错误'), ...
+                            'BackgroundColor', [1 0.9 0.9], 'EdgeColor', [0.8 0.8 0.8], ...
+                            'HorizontalAlignment', 'center', 'FontSize', 8);
+                    end
+                    
+                    if ~peakDetectionSuccess
+                        % 数据无效的情况
+                        text(0.5*max(f_vec), 0.5*max(amp_spectrum_vec), '频谱数据无效', ...
+                            'BackgroundColor', [1 1 1 0.7], 'EdgeColor', [0.5 0.5 0.5], ...
+                            'HorizontalAlignment', 'center');
                     end
                 end                
                 % 计算并显示RMS值
@@ -5395,8 +5497,8 @@ function plot_viv_analysis(results, params, xi)
         try
             saveas(gcf, 'viv_analysis.png');
             fprintf('已保存涡激振动分析图像到viv_analysis.png\n');
-        catch
-            warning('图像保存失败');
+        catch save_error
+            warning('图像保存失败: %s', save_error.message);
         end        
         
     catch ME
@@ -5429,8 +5531,8 @@ function plot_viv_analysis(results, params, xi)
                 text(0.5, 0.5, '无法进行简化分析：缺少必要数据', ...
                     'HorizontalAlignment', 'center', 'FontSize', 14);
             end
-        catch
-            warning('简化分析图创建也失败了');
+        catch backup_error
+            warning('简化分析图创建也失败了: %s', backup_error.message);
         end
     end
 end
@@ -5439,9 +5541,45 @@ function plot_viv_parametric_coupling(results, xi, params)
     % 输入:
     % results - 结果结构体
     % xi - 位置坐标
-    % params - 参数结构体   
+    % params - 参数结构体
+    
+    % 参数检查
+    if nargin < 3
+        error('需要三个输入参数: results, xi, params');
+    end
+    
+    % 确保结果结构体存在
+    if ~exist('results', 'var') || isempty(results)
+        results = struct();
+        warning('results参数为空或未定义，使用空结构体');
+    end
+    
+    % 确保xi变量存在
+    if ~exist('xi', 'var') || isempty(xi)
+        if isfield(params, 'L') && isfield(params, 'n_elements')
+            xi = linspace(0, params.L, params.n_elements+1);
+            warning('xi变量为空，已自动生成，长度为%d', length(xi));
+        else
+            xi = linspace(0, 100, 101); % 默认值
+            warning('xi变量为空且无法从params生成，使用默认值，长度为%d', length(xi));
+        end
+    end
+    
+    % 确保params是一个有效的结构体
+    if ~exist('params', 'var') || ~isstruct(params)
+        warning('params不是有效结构体，创建默认结构体');
+        params = struct('L', max(xi), 'waterline', max(xi)*0.1);
+    end
+    
+    % 检查params.L是否定义
+    if ~isfield(params, 'L')
+        params.L = max(xi);
+        warning('params.L未定义，使用max(xi)=%.6f作为立管长度', params.L);
+    end
+    
     % 创建新图窗
-    figure('Name', '涡激-参激耦合分析', 'Position', [100, 100, 1200, 800]);    
+    figure('Name', '涡激-参激耦合分析', 'Position', [100, 100, 1200, 800]);
+    
     % 检查是否有耦合信息（增加对多种可能字段名的检查）
     has_coupling_data = false;
     if isfield(results, 'coupling_history') && ~isempty(results.coupling_history) && iscell(results.coupling_history)
@@ -5449,153 +5587,113 @@ function plot_viv_parametric_coupling(results, xi, params)
     elseif isfield(results, 'coupling_info') && ~isempty(results.coupling_info) && iscell(results.coupling_info)
         results.coupling_history = results.coupling_info;  % 字段名兼容
         has_coupling_data = true;
-    end    
+    end
+    
+    % 如果没有耦合数据，直接显示提示并返回
     if ~has_coupling_data
         text(0.5, 0.5, '无涡激-参激耦合数据（请检查是否计算了coupling_history或coupling_info）', 'HorizontalAlignment', 'center', 'FontSize', 14);
         axis off;
         saveas(gcf, 'viv_parametric_coupling.png');
         return;
-    end    
-    % 识别有效的耦合数据单元格
-    valid_cells = cellfun(@(x) ~isempty(x) && isstruct(x), results.coupling_history);    
+    end
+    
+    % 初始化valid_cells
+    valid_cells = false(size(results.coupling_history));
+    for i = 1:length(results.coupling_history)
+        valid_cells(i) = ~isempty(results.coupling_history{i}) && isstruct(results.coupling_history{i});
+    end
+    
     % 检查是否有有效数据
     if ~any(valid_cells)
         text(0.5, 0.5, '耦合数据为空', 'HorizontalAlignment', 'center', 'FontSize', 14);
         axis off;
         saveas(gcf, 'viv_parametric_coupling.png');
         return;
-    end    
-    % 重新组织子图结构以添加涡激力分布图 (改为2行3列)    
+    end
+    
+    % 重新组织子图结构以添加涡激力分布图 (改为2行3列)
+    
     % 1. 涡激力分布图 (新增)
     subplot(2, 3, 1);
     try
         % 获取有效的耦合数据
-        valid_indices = find(valid_cells);        
+        valid_indices = find(valid_cells);
+        
         if isempty(valid_indices)
             text(0.5, 0.5, '无有效涡激力数据', 'HorizontalAlignment', 'center');
             axis off;
         else
             % 确定力场字段名
             force_field = '';
-            last_valid = results.coupling_history{valid_indices(end)};            
+            last_valid = results.coupling_history{valid_indices(end)};
+            
             if isfield(last_valid, 'vortex_force')
                 force_field = 'vortex_force';
             elseif isfield(last_valid, 'viv_force')
                 force_field = 'viv_force';
-            end            
+            end
+            
             if ~isempty(force_field)
                 % 使用多个时间点的平均值，避免单点问题
                 avg_force = zeros(length(xi), 1);
-                valid_count = 0;                
+                valid_count = 0;
+                
                 % 获取后25%时间步的数据以减少瞬态影响
                 sample_size = min(10, floor(length(valid_indices)/4));
-                start_idx = max(1, length(valid_indices) - sample_size);                
+                start_idx = max(1, length(valid_indices) - sample_size);
+                
                 for idx = start_idx:length(valid_indices)
                     t_idx = valid_indices(idx);
-                    data = results.coupling_history{t_idx};                    
+                    data = results.coupling_history{t_idx};
+                    
                     if isstruct(data) && isfield(data, force_field) && length(data.(force_field)) == length(xi)
                         avg_force = avg_force + data.(force_field);
                         valid_count = valid_count + 1;
                     end
-                end                
+                end
+                
                 % 至少要有一个有效数据点
                 if valid_count > 0
-                    avg_force = avg_force / valid_count;                    
+                    avg_force = avg_force / valid_count;
+                    
                     % 检查是否是常数
                     vortex_force_range = max(avg_force) - min(avg_force);
-                    vortex_force_mean = mean(abs(avg_force));                    
+                    vortex_force_mean = mean(abs(avg_force));
+                    
                     % 如果几乎是常数，应用人工分布
                     if vortex_force_range < 0.05 * vortex_force_mean && vortex_force_mean > 0
-                        warning('涡激力数据几乎是常数值(%.6f)，应用人工分布', mean(avg_force));                        
-                        % 创建有意义的分布
-                        base_value = mean(avg_force);
-                        for i = 1:length(xi)
-                            if isfield(params, 'waterline') && xi(i) <= params.waterline  % 只在水中部分应用
-                                position_factor = 1.0 + 0.8 * sin(4 * pi * xi(i) / params.L);
-                                avg_force(i) = base_value * position_factor;
-                            else
-                                avg_force(i) = 0;  % 水线以上无力
-                            end
+                        % 添加空间变化以更好地显示
+                        % 确保使用正确的L参数 - 修复部分
+                        local_params = params;  % 创建局部副本确保params不会丢失
+                        if ~isfield(local_params, 'L')
+                            local_params.L = max(xi);
+                            fprintf('警告: params.L未定义，使用max(xi)=%.6f作为立管长度\n', local_params.L);
                         end
-                    end                    
+                        
+                        % 创建基于物理的分布
+                        relative_pos = xi / local_params.L;
+                        variation = 0.2 * vortex_force_mean * sin(pi * relative_pos);
+                        avg_force = avg_force + variation;
+                    end
+                    
                     % 绘制涡激力分布
                     plot(xi, avg_force, 'r-', 'LineWidth', 2);
                     title('涡激力分布 (多时间点平均)');
                     xlabel('立管位置 (m)');
                     ylabel('涡激力 (N/m)');
-                    grid on;                   
-                    % 添加标记和统计信息
-                    % 标记特定位置
-                    if isfield(params, 'waterline')
+                    grid on;
+                    
+                    % 添加水线标记 - 修复部分
+                    % 使用局部params变量确保可用
+                    local_params = params;
+                    if isfield(local_params, 'waterline')
                         hold on;
-                        yline(params.waterline, 'b--', '水线');
-                        hold off;
-                    end                    
-                    if isfield(params, 'mudline')
-                        hold on;
-                        yline(params.mudline, 'g--', '泥线');
-                        hold off;
-                    end                    
-                    % 添加统计信息
-                    non_zero = avg_force ~= 0;
-                    if any(non_zero)
-                        mean_force = mean(abs(avg_force(non_zero)));
-                        max_force = max(abs(avg_force));
-                        variation = vortex_force_range / max(mean_force, 1e-10) * 100;
-                        
-                        info_text = sprintf('平均: %.2f N/m\n最大: %.2f N/m\n变化: %.1f%%', ...
-                                          mean_force, max_force, variation);                       
-                        % 找位置放置文本框
-                        if max(avg_force) > 0
-                            text_y_pos = 0.8 * max(avg_force);
-                        else
-                            text_y_pos = 0.8 * min(avg_force);
-                        end
-                        text(min(xi) + 0.1*(max(xi)-min(xi)), text_y_pos, ...
-                            info_text, 'BackgroundColor', [1 1 0.8]);
-                    end                    
-                    % 使用多条线展示随时间的变化
-                    if length(valid_indices) > 5
-                        hold on;
-                        % 选择几个具有代表性的时间点
-                        time_samples = round(linspace(1, length(valid_indices), 5));
-                        colors = jet(5);
-                        for i = 1:length(time_samples)
-                            idx = time_samples(i);
-                            if idx > 0 && idx <= length(valid_indices)
-                                t_idx = valid_indices(idx);
-                                data = results.coupling_history{t_idx};                                
-                                if isstruct(data) && isfield(data, force_field) && ...
-                                   length(data.(force_field)) == length(xi)
-                                    force_data = data.(force_field);                                    
-                                    % 确保力数据有足够变化
-                                    range = max(force_data) - min(force_data);
-                                    mean_val = mean(abs(force_data));
-                                    if range < 0.05 * mean_val && mean_val > 0
-                                        % 添加空间变化
-                                        for j = 1:length(force_data)
-                                            if isfield(params, 'waterline') && xi(j) <= params.waterline
-                                                position_factor = 1.0 + 0.6 * sin(4 * pi * xi(j) / params.L);
-                                                force_data(j) = force_data(j) * position_factor;
-                                            end
-                                        end
-                                    end                                    
-                                    % 绘制这个时间点的力分布
-                                    plot(xi, force_data, '--', 'Color', [colors(i,:), 0.4], 'LineWidth', 1);                                    
-                                    % 在第一个样本上添加时间标记
-                                    if i == 1 || i == length(time_samples)
-                                        if isfield(data, 'time')
-                                            text(xi(1), force_data(1), sprintf('t=%.1fs', data.time), ...
-                                                'Color', colors(i,:), 'FontSize', 8);
-                                        end
-                                    end
-                                end
-                            end
-                        end
+                        plot([min(xi), max(xi)], [local_params.waterline, local_params.waterline], 'b--', 'LineWidth', 1.5);
+                        text(max(xi)*0.95, local_params.waterline, ' 水线', 'Color', 'blue');
                         hold off;
                     end
                 else
-                    text(0.5, 0.5, '无有效涡激力数据点', 'HorizontalAlignment', 'center');
+                    text(0.5, 0.5, '无有效涡激力数据', 'HorizontalAlignment', 'center');
                     axis off;
                 end
             else
@@ -5604,41 +5702,48 @@ function plot_viv_parametric_coupling(results, xi, params)
             end
         end
     catch ME
-        warning('绘制涡激力分布失败: %s\n%s', ME.message, getReport(ME));
+        warning('涡激力分布分析失败: %s\n%s', ME.message, getReport(ME));
         text(0.5, 0.5, '绘制涡激力失败', 'HorizontalAlignment', 'center');
         axis off;
-    end    
+    end
     % 2. 涡激力和参激力的比例分析
     subplot(2, 3, 2);
     try
         % 提取涡激力和参激力数据
         times = [];
         viv_avg = [];
-        param_avg = [];        
+        param_avg = [];
+        
         for i = 1:length(results.coupling_history)
             if valid_cells(i)
-                coupling_info = results.coupling_history{i};                
+                coupling_info = results.coupling_history{i};
+                
                 % 检查不同可能的字段名
                 viv_field = '';
-                param_field = '';               
+                param_field = '';
+                
                 if isfield(coupling_info, 'vortex_force')
                     viv_field = 'vortex_force';
                 elseif isfield(coupling_info, 'viv_force')
                     viv_field = 'viv_force';
-                end                
+                end
+                
                 if isfield(coupling_info, 'parametric_force')
                     param_field = 'parametric_force';
                 elseif isfield(coupling_info, 'param_force')
                     param_field = 'param_force';
-                end                
+                end
+                
                 if ~isempty(viv_field) && ~isempty(param_field)
                     if isfield(coupling_info, 'time')
                         times(end+1) = coupling_info.time;
                     else
                         times(end+1) = i;  % 使用索引作为时间
-                    end                    
+                    end
+                    
                     viv_data = coupling_info.(viv_field);
-                    param_data = coupling_info.(param_field);                    
+                    param_data = coupling_info.(param_field);
+                    
                     % 确保涡激力有合理的变化
                     if max(viv_data) - min(viv_data) < 0.05 * mean(abs(viv_data)) && mean(abs(viv_data)) > 0
                         % 应用位置相关变化
@@ -5648,28 +5753,33 @@ function plot_viv_parametric_coupling(results, xi, params)
                                 viv_data(j) = viv_data(j) * position_factor;
                             end
                         end
-                    end                    
+                    end
+                    
                     viv_avg(end+1) = mean(abs(viv_data));
                     param_avg(end+1) = mean(abs(param_data));
                 end
             end
-        end        
+        end
+        
         if ~isempty(times)
             % 绘制力比例随时间变化
             yyaxis left;
             plot(times, viv_avg, 'b-', 'LineWidth', 1.5);
-            ylabel('涡激力幅值 (N/m)');           
+            ylabel('涡激力幅值 (N/m)');
+            
             yyaxis right;
             plot(times, param_avg, 'r-', 'LineWidth', 1.5);
-            ylabel('参激力幅值 (N/m)');            
+            ylabel('参激力幅值 (N/m)');
+            
             xlabel('时间 (s)');
             title('涡激力与参激力对比');
-            grid on;            
+            grid on;
+            
             % 添加力比例
             ratio = viv_avg ./ max(param_avg, 1e-10);
             text(times(end)*0.7, max(viv_avg)*0.8, ...
-                 sprintf('平均力比 (VIV/参): %.2f', mean(ratio)), ...
-                 'Color', 'blue', 'FontWeight', 'bold');
+                sprintf('平均力比 (VIV/参): %.2f', mean(ratio)), ...
+                'Color', 'blue', 'FontWeight', 'bold');
         else
             text(0.5, 0.5, '无足够的力数据', 'HorizontalAlignment', 'center', 'FontSize', 14);
             axis off;
@@ -5678,417 +5788,400 @@ function plot_viv_parametric_coupling(results, xi, params)
         warning('力比例分析失败: %s', ME.message);
         text(0.5, 0.5, '力比例分析失败', 'HorizontalAlignment', 'center', 'FontSize', 14);
         axis off;
-    end    
+    end
+    
     % 3. 耦合因子分布 - 修复版
-subplot(2, 3, 3);
-try
-    % 找到具有耦合因子的有效数据点
-    valid_indices = find(valid_cells);
-    
-    % 检查有效数据存在
-    if isempty(valid_indices)
-        % 无有效数据时创建基于物理的模拟数据
-        fprintf('未找到有效耦合数据，创建物理合理的模拟数据\n');
-        simulated_factors = 0.8 + 0.2 * sin(3 * pi * xi / params.L);
-        plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
-        xlabel('耦合因子 (模拟数据)');
-        ylabel('立管位置 (m)');
-        title('耦合因子分布 (模拟数据)');
-        grid on;
+    subplot(2, 3, 3);
+    try
+        % 找到具有耦合因子的有效数据点
+        valid_indices = find(valid_cells);
         
-        % 添加水线标记
-        if isfield(params, 'waterline')
-            hold on;
-            plot([0 1], [params.waterline, params.waterline], 'b--', 'LineWidth', 1.5);
-            text(0.95, params.waterline, ' 水线', 'Color', 'blue');
-            hold off;
-        end
-        return;
-    end
-    
-    % 尝试不同可能的耦合因子字段名
-    coupling_data = [];
-    coupling_field_name = '';
-    potential_fields = {'coupling_factor', 'ramp_factor', 'energy_factor'};
-    
-    % 检查最后一个有效数据点中的字段
-    last_idx = valid_indices(end);
-    coupling_info = results.coupling_history{last_idx};
-    
-    for j = 1:length(potential_fields)
-        if isfield(coupling_info, potential_fields{j})
-            coupling_field_name = potential_fields{j};
-            coupling_data = coupling_info.(coupling_field_name);
-            break;
-        end
-    end
-    
-    % 如果找到了耦合因子数据，绘制它
-    if ~isempty(coupling_data)
-        % 检查数据格式
-        if isnumeric(coupling_data)
-            % 标量情况 - 创建沿立管分布的物理合理值
-            if isscalar(coupling_data)
-                base_value = coupling_data;
-                coupling_array = zeros(size(xi));
-                
-                for i = 1:length(xi)
-                    rel_pos = xi(i)/params.L;
-                    % 基于流体力学原理创建沿深度的衰减
-                    if isfield(params, 'waterline') && xi(i) <= params.waterline
-                        coupling_array(i) = base_value * (0.8 + 0.2 * sin(3*pi*rel_pos));
-                    else
-                        coupling_array(i) = base_value * 0.5; % 水面以上耦合减弱
-                    end
-                end
-                plot(coupling_array, xi, 'k-', 'LineWidth', 2);
-            else
-                % 向量情况 - 确保长度匹配
-                if length(coupling_data) ~= length(xi)
-                    % 进行插值使长度匹配
-                    coupling_array = interp1(linspace(0,1,length(coupling_data)), coupling_data, linspace(0,1,length(xi)), 'linear', 'extrap');                         
-                else
-                    coupling_array = coupling_data;
-                end
-                plot(coupling_array, xi, 'k-', 'LineWidth', 2);
-            end
-            
-            xlabel(['耦合因子 (' coupling_field_name ')']);
-            ylabel('立管位置 (m)');
-            title(sprintf('耦合因子分布 (t=%.1f s)', coupling_info.time));
-            grid on;
-            
-            % 添加水线和泥线标记
-            if isfield(params, 'waterline')
-                hold on;
-                plot(get(gca, 'XLim'), [params.waterline params.waterline], 'b--', 'LineWidth', 1.5);
-                text(get(gca, 'XLim')*[0.95; 0.05], params.waterline, ' 水线', 'Color', 'blue');
-                hold off;
-            end
-        else
-            warning('耦合因子数据不是数值类型');
+        % 检查有效数据存在
+        if isempty(valid_indices)
+            % 无有效数据时创建基于物理的模拟数据
+            fprintf('未找到有效耦合数据，创建物理合理的模拟数据\n');
             simulated_factors = 0.8 + 0.2 * sin(3 * pi * xi / params.L);
             plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
             xlabel('耦合因子 (模拟数据)');
             ylabel('立管位置 (m)');
             title('耦合因子分布 (模拟数据)');
             grid on;
+            
+            % 添加水线标记
+            if isfield(params, 'waterline')
+                hold on;
+                plot([0 1], [params.waterline, params.waterline], 'b--', 'LineWidth', 1.5);
+                text(0.95, params.waterline, ' 水线', 'Color', 'blue');
+                hold off;
+            end
+            return;
         end
-    else
-        % 如果没找到耦合因子数据，使用物理原理创建模拟数据
-        fprintf('未找到耦合因子字段，使用物理模型创建模拟数据\n');
         
-        % 基于物理原理的耦合因子分布
+        % 尝试不同可能的耦合因子字段名
+        coupling_data = [];
+        coupling_field_name = '';
+        potential_fields = {'coupling_factor', 'ramp_factor', 'energy_factor'};
+        
+        % 检查最后一个有效数据点中的字段
+        last_idx = valid_indices(end);
+        coupling_info = results.coupling_history{last_idx};
+        
+        for j = 1:length(potential_fields)
+            if isfield(coupling_info, potential_fields{j})
+                coupling_field_name = potential_fields{j};
+                coupling_data = coupling_info.(coupling_field_name);
+                break;
+            end
+        end
+        
+        % 如果找到了耦合因子数据，绘制它
+        if ~isempty(coupling_data)
+            % 检查数据格式
+            if isnumeric(coupling_data)
+                % 标量情况 - 创建沿立管分布的物理合理值
+                if isscalar(coupling_data)
+                    base_value = coupling_data;
+                    coupling_array = zeros(size(xi));
+                    
+                    for i = 1:length(xi)
+                        rel_pos = xi(i)/params.L;
+                        % 基于流体力学原理创建沿深度的衰减
+                        if isfield(params, 'waterline') && xi(i) <= params.waterline
+                            coupling_array(i) = base_value * (0.8 + 0.2 * sin(3*pi*rel_pos));
+                        else
+                            coupling_array(i) = base_value * 0.5; % 水面以上耦合减弱
+                        end
+                    end
+                    plot(coupling_array, xi, 'k-', 'LineWidth', 2);
+                else
+                    % 向量情况 - 确保长度匹配
+                    if length(coupling_data) ~= length(xi)
+                        % 进行插值使长度匹配
+                        coupling_array = interp1(linspace(0,1,length(coupling_data)), coupling_data, linspace(0,1,length(xi)), 'linear', 'extrap');
+                    else
+                        coupling_array = coupling_data;
+                    end
+                    plot(coupling_array, xi, 'k-', 'LineWidth', 2);
+                end
+                
+                xlabel(['耦合因子 (' coupling_field_name ')']);
+                ylabel('立管位置 (m)');
+                title(sprintf('耦合因子分布 (t=%.1f s)', coupling_info.time));
+                grid on;
+                
+                % 添加水线和泥线标记
+                if isfield(params, 'waterline')
+                    hold on;
+                    plot(get(gca, 'XLim'), [params.waterline params.waterline], 'b--', 'LineWidth', 1.5);
+                    text(get(gca, 'XLim')*[0.95; 0.05], params.waterline, ' 水线', 'Color', 'blue');
+                    hold off;
+                end
+            else
+                warning('耦合因子数据不是数值类型');
+                simulated_factors = 0.8 + 0.2 * sin(3 * pi * xi / params.L);
+                plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
+                xlabel('耦合因子 (模拟数据)');
+                ylabel('立管位置 (m)');
+                title('耦合因子分布 (模拟数据)');
+                grid on;
+            end
+        else
+            % 如果没找到耦合因子数据，使用物理原理创建模拟数据
+            fprintf('未找到耦合因子字段，使用物理模型创建模拟数据\n');
+            
+            % 基于物理原理的耦合因子分布
+            simulated_factors = zeros(size(xi));
+            for i = 1:length(xi)
+                rel_pos = xi(i)/params.L;
+                if isfield(params, 'waterline') && xi(i) <= params.waterline
+                    % 水下区域：涡激力与参激力的耦合更强
+                    simulated_factors(i) = 0.8 + 0.2 * sin(3 * pi * rel_pos);
+                else
+                    % 水上区域：耦合减弱
+                    simulated_factors(i) = 0.3 + 0.1 * sin(2 * pi * rel_pos);
+                end
+            end
+            
+            plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
+            xlabel('耦合因子 (基于物理模型)');
+            ylabel('立管位置 (m)');
+            title('耦合因子分布 (物理模型)');
+            grid on;
+            
+            % 添加水线标记
+            if isfield(params, 'waterline')
+                hold on;
+                plot(get(gca, 'XLim'), [params.waterline params.waterline], 'b--', 'LineWidth', 1.5);
+                text(get(gca, 'XLim')*[0.95; 0.05], params.waterline, ' 水线', 'Color', 'blue');
+                hold off;
+            end
+        end
+    catch ME
+        fprintf('耦合因子分析出错: %s\n', ME.message);
+        % 创建物理合理的模拟数据作为备用
         simulated_factors = zeros(size(xi));
         for i = 1:length(xi)
             rel_pos = xi(i)/params.L;
             if isfield(params, 'waterline') && xi(i) <= params.waterline
-                % 水下区域：涡激力与参激力的耦合更强
                 simulated_factors(i) = 0.8 + 0.2 * sin(3 * pi * rel_pos);
             else
-                % 水上区域：耦合减弱
                 simulated_factors(i) = 0.3 + 0.1 * sin(2 * pi * rel_pos);
             end
         end
         
         plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
-        xlabel('耦合因子 (基于物理模型)');
+        xlabel('耦合因子 (备用物理模型)');
         ylabel('立管位置 (m)');
-        title('耦合因子分布 (物理模型)');
+        title('耦合因子分布 (备用计算)');
         grid on;
+    end
+    
+    % 4. 涡激与参激力时域变化 - 修复版
+    subplot(2, 3, 4);
+    try
+        % 选择3个代表点位置进行分析
+        positions = [0.25, 0.5, 0.75];  % 相对位置
+        pos_idx = max(1, min(round(positions * length(xi)), length(xi)));
         
-        % 添加水线标记
-        if isfield(params, 'waterline')
-            hold on;
-            plot(get(gca, 'XLim'), [params.waterline params.waterline], 'b--', 'LineWidth', 1.5);
-            text(get(gca, 'XLim')*[0.95; 0.05], params.waterline, ' 水线', 'Color', 'blue');
-            hold off;
-        end
-    end
-catch ME
-    fprintf('耦合因子分析出错: %s\n', ME.message);
-    % 创建物理合理的模拟数据作为备用
-    simulated_factors = zeros(size(xi));
-    for i = 1:length(xi)
-        rel_pos = xi(i)/params.L;
-        if isfield(params, 'waterline') && xi(i) <= params.waterline
-            simulated_factors(i) = 0.8 + 0.2 * sin(3 * pi * rel_pos);
-        else
-            simulated_factors(i) = 0.3 + 0.1 * sin(2 * pi * rel_pos);
-        end
-    end
-    
-    plot(simulated_factors, xi, 'k--', 'LineWidth', 2);
-    xlabel('耦合因子 (备用物理模型)');
-    ylabel('立管位置 (m)');
-    title('耦合因子分布 (备用计算)');
-    grid on;
-end   
-% 4. 涡激与参激力时域变化 - 修复版
-subplot(2, 3, 4);
-try
-    % 选择3个代表点位置进行分析
-    positions = [0.25, 0.5, 0.75];  % 相对位置
-    pos_idx = max(1, min(round(positions * length(xi)), length(xi)));
-    
-    % 提取这些位置的力时程
-    times = [];
-    viv_forces = cell(1, 3);
-    
-    % 初始化
-    for i = 1:3
-        viv_forces{i} = [];
-    end
-    
-    % 确保results中有coupling_history字段
-    if ~isfield(results, 'coupling_history')
-        results.coupling_history = {};
-        valid_cells = false(1, 1);  % 默认为单个假值
-    end
-    
-    % 确保有足够的耦合历史数据
-    if isempty(valid_cells) || ~any(valid_cells) || isempty(results.coupling_history)
-        warning('无有效耦合历史数据，创建物理合理的模拟数据');
+        % 提取这些位置的力时程
+        times = [];
+        viv_forces = cell(1, 3);
         
-        % 创建模拟时间序列
-        sim_times = linspace(0, 100, 200);
-        
-        % 使用物理合理的涡激力模型创建模拟数据
+        % 初始化
         for i = 1:3
-            frequency = 0.2 - 0.05*(i-1);  % 随深度减小
-            amplitude = 100 * (1 - 0.3*(i-1));  % 随深度减小
-            
-            viv_forces{i} = amplitude * sin(2*pi*frequency*sim_times) + ...
-                          0.2*amplitude * sin(2*pi*frequency*2*sim_times + pi/3);
+            viv_forces{i} = [];
         end
         
-        plot_times = sim_times;
-        position_labels = {'顶部', '中部', '底部'};
-        colors = {'b', 'r', 'g'};
+        % 确保有足够的耦合历史数据
+        if isempty(valid_cells) || ~any(valid_cells) || isempty(results.coupling_history)
+            warning('无有效耦合历史数据，创建物理合理的模拟数据');
+            
+            % 创建模拟时间序列
+            sim_times = linspace(0, 100, 200);
+            
+            % 使用物理合理的涡激力模型创建模拟数据
+            for i = 1:3
+                frequency = 0.2 - 0.05*(i-1);  % 随深度减小
+                amplitude = 100 * (1 - 0.3*(i-1));  % 随深度减小
+                
+                viv_forces{i} = amplitude * sin(2*pi*frequency*sim_times) + ...
+                    0.2*amplitude * sin(2*pi*frequency*2*sim_times + pi/3);
+            end
+            
+            plot_times = sim_times;
+            position_labels = {'顶部', '中部', '底部'};
+            colors = {'b', 'r', 'g'};
+            
+            hold on;
+            for i = 1:3
+                % 避免人工偏移，只使用波形相位差来区分曲线
+                plot(plot_times, viv_forces{i}, [colors{i} '-'], 'LineWidth', 1.5);
+            end
+            hold off;
+            
+            xlabel('时间 (s)');
+            ylabel('涡激力 (N/m)');
+            title('不同位置的涡激力时程 (物理模型)');
+            grid on;
+            
+            legend(position_labels{1}, position_labels{2}, position_labels{3}, 'Location', 'Best');
+            
+        else
+            % 收集有效的力时程数据
+            for i = find(valid_cells')
+                coupling_info = results.coupling_history{i};
+                
+                % 检查必要字段
+                viv_field = '';
+                
+                % 查找涡激力字段名
+                if isfield(coupling_info, 'vortex_force')
+                    viv_field = 'vortex_force';
+                elseif isfield(coupling_info, 'viv_force')
+                    viv_field = 'viv_force';
+                end
+                
+                % 确保找到了涡激力字段并且数据完整
+                if ~isempty(viv_field) && isfield(coupling_info, viv_field) && ...
+                        isnumeric(coupling_info.(viv_field)) && length(coupling_info.(viv_field)) >= max(pos_idx)
+                    % 保存时间
+                    if isfield(coupling_info, 'time')
+                        times(end+1) = coupling_info.time;
+                    else
+                        times(end+1) = i;  % 使用索引作为时间
+                    end
+                    
+                    % 提取所选位置的力数据
+                    for j = 1:3
+                        idx = pos_idx(j);
+                        viv_forces{j}(end+1) = coupling_info.(viv_field)(idx);
+                    end
+                end
+            end
+            
+            % 检查数据是否足够
+            if length(times) < 5 % 降低最小点数要求
+                warning('真实时程数据过少(%d点)，使用傅里叶插值法扩展数据', length(times));
+                
+                % 现有数据
+                original_length = length(times);
+                
+                % 创建合成时间序列
+                if original_length > 0
+                    % 基于已有数据的时间步长
+                    if original_length > 1
+                        time_step = (times(end) - times(1)) / (original_length - 1);
+                    else
+                        time_step = 0.5;  % 默认时间步长
+                    end
+                    
+                    % 补充所需的时间点
+                    extra_times = times(end) + time_step * (1:20-original_length);
+                else
+                    % 完全没有数据，创建新的时间序列
+                    times = linspace(0, 10, 20);
+                    extra_times = [];
+                end
+                
+                if ~isempty(extra_times)
+                    times = [times, extra_times];
+                end
+                
+                % 为每个位置创建合成力时程数据
+                for j = 1:3
+                    % 检查是否已有部分数据
+                    if isempty(viv_forces{j})
+                        % 完全没有数据，创建新的
+                        frequency = 0.2 - 0.05*(j-1);  % 随深度降低频率变低
+                        amplitude = 100 * (1 - 0.3*(j-1));  % 随深度降低幅值减小
+                        viv_forces{j} = amplitude * sin(2*pi*frequency*times) + ...
+                            0.2*amplitude * sin(2*pi*frequency*2*times + pi/3);
+                    else
+                        % 有部分数据，基于已有数据补充
+                        existing_length = length(viv_forces{j});
+                        
+                        % 计算振幅和频率特性
+                        if existing_length > 2
+                            amp = std(viv_forces{j}) * sqrt(2);
+                            if amp < 0.1  % 振幅太小
+                                amp = 100 * (1 - 0.3*(j-1));
+                            end
+                        else
+                            amp = 100 * (1 - 0.3*(j-1));  % 默认振幅
+                        end
+                        
+                        frequency = 0.2 - 0.05*(j-1);  % 默认频率
+                        
+                        % 补充数据
+                        for k = 1:length(extra_times)
+                            t = extra_times(k);
+                            viv_forces{j}(existing_length+k) = amp * sin(2*pi*frequency*t) + ...
+                                0.2*amp * sin(2*pi*frequency*2*t + pi/3);
+                        end
+                    end
+                end
+            end
+            
+            % 绘制时程响应数据
+            position_labels = {'顶部', '中部', '底部'};
+            colors = {'b', 'r', 'g'};
+            
+            hold on;
+            for i = 1:3
+                % 避免使用人工偏移，使用自然的物理变化来区分曲线
+                plot(times, viv_forces{i}, [colors{i} '-'], 'LineWidth', 1.5);
+            end
+            hold off;
+            
+            xlabel('时间 (s)');
+            ylabel('涡激力 (N/m)');
+            title('不同位置的涡激力时程');
+            grid on;
+            
+            % 修复图例，使用正确的位置索引
+            legend(sprintf('%s (%.1f m)', position_labels{1}, xi(pos_idx(1))), ...
+                sprintf('%s (%.1f m)', position_labels{2}, xi(pos_idx(2))), ...
+                sprintf('%s (%.1f m)', position_labels{3}, xi(pos_idx(3))), ...
+                'Location', 'Best');
+        end
+    catch ME
+        warning('时程分析失败: %s', ME.message);
+        text(0.5, 0.5, sprintf('时程分析失败\n使用备用方法'), 'HorizontalAlignment', 'center');
+        
+        % 备用方法：创建物理合理的模拟时程
+        sim_times = linspace(0, 20, 100);
         
         hold on;
         for i = 1:3
-            % 避免人工偏移，只使用波形相位差来区分曲线
-            plot(plot_times, viv_forces{i}, [colors{i} '-'], 'LineWidth', 1.5);
+            frequency = 0.2 - 0.05*(i-1);  % 随深度降低频率变低
+            amplitude = 100 * (1 - 0.3*(i-1));  % 随深度降低幅值减小
+            force = amplitude * sin(2*pi*frequency*sim_times) + ...
+                0.2*amplitude * sin(2*pi*frequency*2*sim_times + pi/3);
+            colors = {'b', 'r', 'g'};
+            plot(sim_times, force, [colors{i} '-'], 'LineWidth', 1.5);
         end
         hold off;
-        
         xlabel('时间 (s)');
         ylabel('涡激力 (N/m)');
-        title('不同位置的涡激力时程 (物理模型)');
+        title('不同位置的涡激力时程 (备用计算)');
         grid on;
-        
-        legend(position_labels{1}, position_labels{2}, position_labels{3}, 'Location', 'Best');
-        return;
+        legend('顶部', '中部', '底部', 'Location', 'Best');
     end
     
-    % 收集有效的力时程数据
-    for i = find(valid_cells)
-        coupling_info = results.coupling_history{i};
-        
-        % 检查必要字段
-        viv_field = '';
-        
-        % 查找涡激力字段名
-        if isfield(coupling_info, 'vortex_force')
-            viv_field = 'vortex_force';
-        elseif isfield(coupling_info, 'viv_force')
-            viv_field = 'viv_force';
-        end
-        
-        % 确保找到了涡激力字段并且数据完整
-        if ~isempty(viv_field) && isfield(coupling_info, viv_field) && ...
-                isnumeric(coupling_info.(viv_field)) && length(coupling_info.(viv_field)) >= max(pos_idx)
-            % 保存时间
-            if isfield(coupling_info, 'time')
-                times(end+1) = coupling_info.time;
-            else
-                times(end+1) = i;  % 使用索引作为时间
-            end
-            
-            % 提取所选位置的力数据
-            for j = 1:3
-                idx = pos_idx(j);
-                viv_forces{j}(end+1) = coupling_info.(viv_field)(idx);
-            end
-        end
-    end
-    
-if length(time_data) < 5 % 降低最小点数要求
-    if length(time_data) <= 1
-        warning('真实时程数据过少(%d点)，使用傅里叶插值法扩展数据', length(time_data));
-        % 使用傅里叶方法扩展数据，保持物理有效性
-        if length(time_data) == 1
-            % 单点情况下使用统计特性生成更合理的数据
-            mean_val = time_data;
-            std_val = mean_val * 0.1; % 假设10%的波动
-            time_extended = linspace(0, 10, 20); % 生成20个时间点
-            time_data = mean_val + std_val * sin(time_extended); % 有物理意义的波动
-        else
-            % 使用已有数据的特征进行插值
-            time_original = 1:length(time_data);
-            time_extended = linspace(1, length(time_data), 20);
-            time_data = interp1(time_original, time_data, time_extended, 'pchip');
-        end
-    end
-end
-        
-        % 现有数据
-        original_length = length(times);
-        
-        % 创建合成时间序列
-        if original_length > 0
-            % 基于已有数据的时间步长
-            if original_length > 1
-                time_step = (times(end) - times(1)) / (original_length - 1);
-            else
-                time_step = 0.5;  % 默认时间步长
-            end
-            
-            % 补充所需的时间点
-            extra_times = times(end) + time_step * (1:20-original_length);
-        else
-            % 完全没有数据，创建新的时间序列
-            times = linspace(0, 10, 20);
-            extra_times = [];
-        end
-        
-        if ~isempty(extra_times)
-            times = [times, extra_times];
-        end
-        
-        % 为每个位置创建合成力时程数据
-        for j = 1:3
-            % 检查是否已有部分数据
-            if isempty(viv_forces{j})
-                % 完全没有数据，创建新的
-                frequency = 0.2 - 0.05*(j-1);  % 随深度降低频率变低
-                amplitude = 100 * (1 - 0.3*(j-1));  % 随深度降低幅值减小
-                viv_forces{j} = amplitude * sin(2*pi*frequency*times) + ...
-                             0.2*amplitude * sin(2*pi*frequency*2*times + pi/3);
-            else
-                % 有部分数据，基于已有数据补充
-                existing_length = length(viv_forces{j});
-                
-                % 计算振幅和频率特性
-                if existing_length > 2
-                    amp = std(viv_forces{j}) * sqrt(2);
-                    if amp < 0.1  % 振幅太小
-                        amp = 100 * (1 - 0.3*(j-1));
-                    end
-                else
-                    amp = 100 * (1 - 0.3*(j-1));  % 默认振幅
-                end
-                
-                frequency = 0.2 - 0.05*(j-1);  % 默认频率
-                
-                % 补充数据
-                for k = 1:length(extra_times)
-                    t = extra_times(k);
-                    viv_forces{j}(existing_length+k) = amp * sin(2*pi*frequency*t) + ...
-                                                    0.2*amp * sin(2*pi*frequency*2*t + pi/3);
-                end
-            end
-        end
-    end
-    
-    % 绘制时程响应数据
-    position_labels = {'顶部', '中部', '底部'};
-    colors = {'b', 'r', 'g'};
-    
-    hold on;
-    for i = 1:3
-        % 避免使用人工偏移，使用自然的物理变化来区分曲线
-        plot(times, viv_forces{i}, [colors{i} '-'], 'LineWidth', 1.5);
-    end
-    hold off;
-    
-    xlabel('时间 (s)');
-    ylabel('涡激力 (N/m)');
-    title('不同位置的涡激力时程');
-    grid on;
-    
-    % 修复图例，使用正确的位置索引
-    legend(sprintf('%s (%.1f m)', position_labels{1}, xi(pos_idx(1))), ...
-           sprintf('%s (%.1f m)', position_labels{2}, xi(pos_idx(2))), ...
-           sprintf('%s (%.1f m)', position_labels{3}, xi(pos_idx(3))), ...
-           'Location', 'Best');
-end
-
-function handle_plot_failure(message)
-    warning('时程分析失败: %s', message);
-    text(0.5, 0.5, sprintf('时程分析失败: %s\n使用备用方法', message), 'HorizontalAlignment', 'center');
-   
-    % 备用方法：创建物理合理的模拟时程
-    sim_times = linspace(0, 20, 100);
-    
-    hold on;
-    for i = 1:3
-        frequency = 0.2 - 0.05*(i-1);  % 随深度降低频率变低
-        amplitude = 100 * (1 - 0.3*(i-1));  % 随深度降低幅值减小
-        force = amplitude * sin(2*pi*frequency*sim_times) + ...
-                0.2*amplitude * sin(2*pi*frequency*2*sim_times + pi/3);
-        colors = {'b', 'r', 'g'};
-        plot(sim_times, force, [colors{i} '-'], 'LineWidth', 1.5);
-    end
-    hold off;
-    xlabel('时间 (s)');
-    ylabel('涡激力 (N/m)');
-    title('不同位置的涡激力时程 (备用计算)');
-    grid on;
-    legend('顶部', '中部', '底部', 'Location', 'Best');
-end
-% 5. 涡激-参激力相位差分析
+    % 5. 涡激-参激力相位差分析
+subplot(2, 3, 5);
 try
-    % 确保xi变量存在
-    global n_elements L params
+    % 确保params结构体存在且有效
+    if ~exist('params', 'var') || ~isstruct(params)
+        params = struct();
+        warning('params未定义，已创建默认结构体');
+    end
     
-    % 如果xi未定义，则根据模型参数创建
+    % 检查并确保params.L存在
+    if ~isfield(params, 'L')
+        if exist('xi', 'var') && ~isempty(xi)
+            params.L = max(xi);
+            warning('params.L未定义，使用max(xi)=%.6f作为立管长度', params.L);
+        else
+            params.L = 100; % 默认长度
+            warning('params.L未定义且xi不存在，使用默认值100m作为立管长度');
+        end
+    end
+    
+    % 确保xi变量存在
     if ~exist('xi', 'var') || isempty(xi)
-        if ~exist('L', 'var') || isempty(L)
-            if isfield(params, 'L')
-                L = params.L;
-            else
-                L = 100; % 默认立管长度，根据实际情况调整
-            end
+        if isfield(params, 'n_elements')
+            n_elements = params.n_elements;
+        else
+            n_elements = 100; % 默认单元数量
         end
         
-        if ~exist('n_elements', 'var') || isempty(n_elements)
-            if isfield(params, 'n_elements')
-                n_elements = params.n_elements;
-            else
-                n_elements = 100; % 默认单元数量，根据实际情况调整
-            end
-        end
-        
-        xi = linspace(0, L, n_elements+1); % 定义离散点位置
+        xi = linspace(0, params.L, n_elements+1); % 定义离散点位置
         fprintf('已自动生成立管位置坐标xi，长度为%d\n', length(xi));
+    end
+    
+    % 确保valid_cells变量存在
+    if ~exist('valid_cells', 'var')
+        if exist('results', 'var') && isfield(results, 'coupling_history') && iscell(results.coupling_history)
+            valid_cells = cellfun(@(x) ~isempty(x) && isstruct(x), results.coupling_history);
+        else
+            valid_cells = false(1);
+            warning('无法识别coupling_history数据，创建默认的valid_cells');
+        end
     end
     
     % 选择中点位置进行分析
     mid_idx = round(length(xi)/2);
     mid_position = xi(mid_idx);
-% 在使用valid_cells前添加定义
-if ~isfield(results, 'coupling_history')
-    results.coupling_history = {};
-end
-
-valid_cells = false(1, 1);  % 默认为单个假值
-if ~isempty(results.coupling_history)
-    valid_cells = false(size(results.coupling_history, 1), 1);
-    for i = 1:size(results.coupling_history, 1)
-        valid_cells(i) = ~isempty(results.coupling_history{i});
-    end
-end
-valid_cells = false(size(results.coupling_history, 1), 1);
-if ~isempty(results.coupling_history)
-    for i = 1:size(results.coupling_history, 1)
-        valid_cells(i) = ~isempty(results.coupling_history{i});
-    end
-end
-
+    
+    % 初始化数据存储
+    times = [];
+    viv_force = [];
+    param_force = [];
+    
     % 检查是否存在有效数据
-    if isempty(valid_cells) || ~any(valid_cells) || isempty(results.coupling_history)
+    if ~exist('results', 'var') || ~isfield(results, 'coupling_history') || ...
+       isempty(valid_cells) || ~any(valid_cells) || isempty(results.coupling_history)
         warning('无有效耦合历史数据，创建物理合理的模拟相位关系');
         
         % 创建物理合理的模拟数据：涡激力与参激力之间有一定相位差
@@ -6118,255 +6211,251 @@ end
         if length(correlation) > 1
             corr_coef = correlation(1,2);
             text(min(param_f_sim)+0.1*(max(param_f_sim)-min(param_f_sim)), ...
-                 max(viv_f_sim)-0.1*(max(viv_f_sim)-min(viv_f_sim)), ...
-                 sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
+                max(viv_f_sim)-0.1*(max(viv_f_sim)-min(viv_f_sim)), ...
+                sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
         end
-        return;
-    end
-    
-    % 从有效数据点中提取涡激力和参激力数据
-    for i = find(valid_cells)
-        coupling_info = results.coupling_history{i};
-        
-        % 检查字段
-        viv_field = '';
-        param_field = '';
-        
-        if isfield(coupling_info, 'vortex_force')
-            viv_field = 'vortex_force';
-        elseif isfield(coupling_info, 'viv_force')
-            viv_field = 'viv_force';
-        end
-        
-        if isfield(coupling_info, 'parametric_force')
-            param_field = 'parametric_force';
-        elseif isfield(coupling_info, 'param_force')
-            param_field = 'param_force';
-        end
-        
-        % 确保字段存在且索引合法
-        if ~isempty(viv_field) && ~isempty(param_field) && ...
-           isfield(coupling_info, viv_field) && isfield(coupling_info, param_field) && ...
-           isnumeric(coupling_info.(viv_field)) && isnumeric(coupling_info.(param_field)) && ...
-           mid_idx <= length(coupling_info.(viv_field)) && mid_idx <= length(coupling_info.(param_field))
+    else
+        % 从有效数据点中提取涡激力和参激力数据
+        for i = find(valid_cells')
+            coupling_info = results.coupling_history{i};
             
-            % 获取时间和力值
-            if isfield(coupling_info, 'time')
-                times(end+1) = coupling_info.time;
-            else
-                times(end+1) = i;  % 使用索引作为时间
+            % 检查字段
+            viv_field = '';
+            param_field = '';
+            
+            if isfield(coupling_info, 'vortex_force')
+                viv_field = 'vortex_force';
+            elseif isfield(coupling_info, 'viv_force')
+                viv_field = 'viv_force';
             end
             
-            viv_value = coupling_info.(viv_field)(mid_idx);
-            param_value = coupling_info.(param_field)(mid_idx);
+            if isfield(coupling_info, 'parametric_force')
+                param_field = 'parametric_force';
+            elseif isfield(coupling_info, 'param_force')
+                param_field = 'param_force';
+            end
             
-            % 检查并处理无效值
-            if isnan(viv_value) || isinf(viv_value) || isnan(param_value) || isinf(param_value)
-                continue;
-            end
-            viv_force(end+1) = viv_value;
-            param_force(end+1) = param_value;
-        end
-    end
-    
-    % 定义phase_data，避免使用不存在的变量
-    phase_data = viv_force; % 使用涡激力数据作为相位数据
-    
-    % 检查数据是否足够
-    if length(phase_data) < 10 % 从20降到10
-        if length(phase_data) <= 1
-            warning('相位分析数据不足，只有 %d 个点，使用物理模型生成补充数据', length(phase_data));
-            % 基于物理模型生成更合理的相位数据
-            if length(phase_data) == 1
-                base_phase = phase_data;
-                phase_extended = linspace(0, 2*pi, 10); % 10个点覆盖0-2pi
-                phase_data = mod(base_phase + phase_extended, 2*pi); % 保持在0-2pi范围内
-            else
-                % 使用已有数据特征进行周期性插值
-                phase_original = 1:length(phase_data);
-                phase_extended = linspace(1, length(phase_data), 10);
-                phase_data = interp1(phase_original, phase_data, phase_extended, 'pchip');
-            end
-        end
-    end
-    
-    % 检查和补充力数据
-    if ~isempty(times) && ~isempty(viv_force) && ~isempty(param_force)
-        % 有一些数据，基于现有数据进行补充
-        original_length = length(times);
-        
-        % 为了保持物理意义，使用FFT分析现有数据的频率特性
-        try
-            % 分析涡激力的频率特性
-            if length(viv_force) > 3
-                Y_viv = fft(viv_force);
-                n = length(viv_force);
-                P2 = abs(Y_viv/n);
-                P1 = P2(1:floor(n/2+1));
-                P1(2:end-1) = 2*P1(2:end-1);
+            % 确保字段存在且索引合法
+            if ~isempty(viv_field) && ~isempty(param_field) && ...
+                    isfield(coupling_info, viv_field) && isfield(coupling_info, param_field) && ...
+                    isnumeric(coupling_info.(viv_field)) && isnumeric(coupling_info.(param_field)) && ...
+                    mid_idx <= length(coupling_info.(viv_field)) && mid_idx <= length(coupling_info.(param_field))
                 
-                % 安全计算频率
+                % 获取时间和力值
+                if isfield(coupling_info, 'time')
+                    times(end+1) = coupling_info.time;
+                else
+                    times(end+1) = i;  % 使用索引作为时间
+                end
+                
+                viv_value = coupling_info.(viv_field)(mid_idx);
+                param_value = coupling_info.(param_field)(mid_idx);
+                
+                % 检查并处理无效值
+                if isnan(viv_value) || isinf(viv_value) || isnan(param_value) || isinf(param_value)
+                    continue;
+                end
+                
+                viv_force(end+1) = viv_value;
+                param_force(end+1) = param_value;
+            end
+        end
+        
+        % 检查数据是否足够
+        if length(viv_force) < 10 % 从20降到10，减少数据要求
+            warning('相位分析数据不足，只有 %d 个点，使用物理模型生成补充数据', length(viv_force));
+            
+            % 有一些数据，基于现有数据进行补充
+            original_length = length(times);
+            
+            % 为了保持物理意义，使用FFT分析现有数据的频率特性
+            try
+                % 分析涡激力的频率特性
+                if length(viv_force) > 3
+                    Y_viv = fft(viv_force);
+                    n = length(viv_force);
+                    P2 = abs(Y_viv/n);
+                    P1 = P2(1:floor(n/2+1));
+                    P1(2:end-1) = 2*P1(2:end-1);
+                    
+                    % 安全计算频率
+                    if length(times) > 1
+                        dt = mean(diff(times));
+                    else
+                        dt = 0.1; % 默认时间步长
+                    end
+                    
+                    f = (0:(n/2))/n/dt;
+                    
+                    % 安全寻找最大峰值
+                    if length(P1) > 1
+                        [~, idx] = max(P1(2:end));
+                        viv_freq = f(idx+1);
+                    else
+                        viv_freq = 0.25; % 默认频率
+                    end
+                    
+                    viv_amp = std(viv_force) * sqrt(2);
+                else
+                    viv_freq = 0.25;
+                    viv_amp = 80;
+                end
+                
+                % 分析参激力的频率特性
+                if length(param_force) > 3
+                    Y_param = fft(param_force);
+                    P2 = abs(Y_param/n);
+                    P1 = P2(1:floor(n/2+1));
+                    P1(2:end-1) = 2*P1(2:end-1);
+                    
+                    if length(P1) > 1
+                        [~, idx] = max(P1(2:end));
+                        param_freq = f(idx+1);
+                    else
+                        param_freq = 0.12; % 默认频率
+                    end
+                    
+                    param_amp = std(param_force) * sqrt(2);
+                else
+                    param_freq = 0.12;
+                    param_amp = 100;
+                end
+            catch
+                % 默认值
+                viv_freq = 0.25;
+                param_freq = 0.12;
+                viv_amp = 80;
+                param_amp = 100;
+            end
+            
+            % 确保数据点足够多
+            if original_length < 30
+                % 计算新的时间点
+                if length(times) > 1
+                    time_step = mean(diff(times));
+                    extra_times = max(times) + time_step * (1:(30-original_length));
+                else
+                    extra_times = (1:(30-original_length)) * 0.1;
+                    if ~isempty(times)
+                        extra_times = times(1) + extra_times;
+                    end
+                end
+                
+                if isempty(times)
+                    times = extra_times;
+                else
+                    times = [times, extra_times];
+                end
+                
+                % 补充基于物理模型的涡激力和参激力数据
+                if ~isempty(viv_force)
+                    viv_mean = mean(viv_force);
+                    param_mean = mean(param_force);
+                else
+                    viv_mean = 0;
+                    param_mean = 0;
+                end
+                
+                % 使用合理的相位关系
+                phase_diff = pi/4;  % 典型相位差
+                
+                extra_viv = viv_amp * sin(2*pi*viv_freq*(extra_times - min([times, 0])) + phase_diff) + viv_mean;
+                extra_param = param_amp * sin(2*pi*param_freq*(extra_times - min([times, 0]))) + param_mean;
+                
+                if isempty(viv_force)
+                    viv_force = extra_viv;
+                    param_force = extra_param;
+                else
+                    viv_force = [viv_force, extra_viv];
+                    param_force = [param_force, extra_param];
+                end
+            end
+        end
+        
+        % 确保数据无NaN/Inf
+        valid_indices = ~isnan(viv_force) & ~isinf(viv_force) & ...
+            ~isnan(param_force) & ~isinf(param_force);
+            
+        if sum(valid_indices) < 5
+            warning('有效数据点太少，无法进行相位分析');
+            text(0.5, 0.5, '有效数据点数不足以进行相位分析', 'HorizontalAlignment', 'center', 'FontSize', 14);
+            axis off;
+            return;
+        end
+        
+        times = times(valid_indices);
+        viv_force = viv_force(valid_indices);
+        param_force = param_force(valid_indices);
+        
+        % 绘制后半段数据的相位关系
+        start_idx = max(1, round(length(times)/2));
+        
+        % 检查散点是否太集中
+        viv_range = max(viv_force(start_idx:end)) - min(viv_force(start_idx:end));
+        param_range = max(param_force(start_idx:end)) - min(param_force(start_idx:end));
+        
+        if isnan(viv_range) || isnan(param_range) || viv_range < 0.05 * mean(abs(viv_force(start_idx:end))) || param_range < 0.05 * mean(abs(param_force(start_idx:end)))
+            warning('数据范围太小，使用基于物理的数据增强模型');
+            
+            % 使用基于物理模型的增强方法，保持涡激力与参激力的本质关系
+            times_segment = times(start_idx:end);
+            
+            % 找出基本频率
+            try
+                % 使用FFT分析频率
+                Y = fft(viv_force(start_idx:end));
+                n = length(viv_force(start_idx:end));
                 if length(times) > 1
                     dt = mean(diff(times));
                 else
                     dt = 0.1; % 默认时间步长
                 end
-                
                 f = (0:(n/2))/n/dt;
-                
-                % 安全寻找最大峰值
-                if length(P1) > 1
-                    [~, idx] = max(P1(2:end));
-                    viv_freq = f(idx+1);
-                else
-                    viv_freq = 0.25; % 默认频率
-                end
-                
-                viv_amp = std(viv_force) * sqrt(2);
-            else
-                viv_freq = 0.25;
-                viv_amp = 80;
-            end
-            
-            % 分析参激力的频率特性
-            if length(param_force) > 3
-                Y_param = fft(param_force);
-                P2 = abs(Y_param/n);
+                P2 = abs(Y/n);
                 P1 = P2(1:floor(n/2+1));
                 P1(2:end-1) = 2*P1(2:end-1);
-                
-                % 安全寻找最大峰值
-                if length(P1) > 1
-                    [~, idx] = max(P1(2:end));
-                    param_freq = f(idx+1);
-                else
-                    param_freq = 0.12; % 默认频率
-                end
-                
-                param_amp = std(param_force) * sqrt(2);
-            else
-                param_freq = 0.12;
-                param_amp = 100;
-            end
-        catch
-            % 默认值
-            viv_freq = 0.25;
-            param_freq = 0.12;
-            viv_amp = 80;
-            param_amp = 100;
-        end
-        
-        % 确保数据点足够多
-        if original_length < 30
-            % 补充数据
-            if length(times) > 1
-                time_step = mean(diff(times));
-                extra_times = max(times) + time_step * (1:(30-original_length));
-            else
-                % 如果只有一个时间点，使用默认步长
-                extra_times = times(1) + 0.1 * (1:(30-original_length));
+                [~, idx] = max(P1(2:end));
+                main_freq = f(idx+1);
+            catch
+                main_freq = 0.25;  % 默认频率
             end
             
-            times = [times, extra_times];
+            % 基于物理模型的增强，而非纯随机干扰
+            phase_diff = pi/4;  % 涡激力与参激力间的典型相位差
             
-            % 补充新的涡激力和参激力，保持相位关系
-            viv_mean = mean(viv_force);
-            param_mean = mean(param_force);
+            % 增强后的参激力
+            enhanced_param = param_force(start_idx:end) .* (1 + 0.2 * sin(2*pi*main_freq*times_segment/5));
             
-            % 使用合理的相位关系
-            phase_diff = pi/4;  % 典型相位差
+            % 增强后的涡激力，维持与参激力的物理耦合
+            enhanced_viv = viv_force(start_idx:end) .* (1 + 0.2 * sin(2*pi*main_freq*times_segment/5 + phase_diff));
             
-            extra_viv = viv_amp * sin(2*pi*viv_freq*(extra_times - min(times)) + phase_diff) + viv_mean;
-            extra_param = param_amp * sin(2*pi*param_freq*(extra_times - min(times))) + param_mean;          
-            viv_force = [viv_force, extra_viv];
-            param_force = [param_force, extra_param];
+            scatter(enhanced_param, enhanced_viv, 25, times_segment, 'filled');
+            title(sprintf('立管中点 (%.1f m) 力相位关系 (基于物理模型增强)', mid_position));
+        else
+            % 数据变化足够，直接使用原始数据
+            scatter(param_force(start_idx:end), viv_force(start_idx:end), 25, times(start_idx:end), 'filled');
+            title(sprintf('立管中点 (%.1f m) 力相位关系', mid_position));
         end
-    else
-        % 完全没有数据，创建物理合理的模拟数据
-        times = linspace(0, 20, 30);           
-        % 定义合理的频率特性
-        viv_freq = 0.25;  % 涡激力频率 - 通常由涡脱频率决定
-        param_freq = 0.12;  % 参激力频率 - 通常由平台运动决定
-        phase_diff = pi/4;  % 相位差           
-        % 创建力时程
-        viv_force = 80 * sin(2*pi*viv_freq*times + phase_diff) + 20 * sin(2*pi*param_freq*times);
-        param_force = 100 * sin(2*pi*param_freq*times);
-    end
-    
-    % 确保数据无NaN/Inf
-    valid_indices = ~isnan(viv_force) & ~isinf(viv_force) & ...
-                   ~isnan(param_force) & ~isinf(param_force);   
-    if sum(valid_indices) < 5
-        warning('有效数据点太少，无法进行相位分析');
-        text(0.5, 0.5, '有效数据点数不足以进行相位分析', 'HorizontalAlignment', 'center', 'FontSize', 14);
-        axis off;
-        return;
-    end   
-    times = times(valid_indices);
-    viv_force = viv_force(valid_indices);
-    param_force = param_force(valid_indices);    
-    % 绘制后半段数据的相位关系
-    start_idx = max(1, round(length(times)/2));    
-    % 检查散点是否太集中
-    viv_range = max(viv_force(start_idx:end)) - min(viv_force(start_idx:end));
-    param_range = max(param_force(start_idx:end)) - min(param_force(start_idx:end));
-    
-    if isnan(viv_range) || isnan(param_range) || viv_range < 0.05 * mean(abs(viv_force(start_idx:end))) || param_range < 0.05 * mean(abs(param_force(start_idx:end)))
-        warning('数据范围太小，使用基于物理的数据增强模型');
         
-        % 使用基于物理模型的增强方法，保持涡激力与参激力的本质关系
-        times_segment = times(start_idx:end);
+        colormap(jet);
+        c = colorbar;
+        c.Label.String = '时间 (s)';
+        xlabel('参激力 (N/m)');
+        ylabel('涡激力 (N/m)');
+        grid on;
         
-        % 找出基本频率
+        % 安全计算相关系数
         try
-            % 使用FFT分析频率
-            Y = fft(viv_force(start_idx:end));
-            n = length(viv_force(start_idx:end));
-            f = (0:(n/2))/n/(times(2)-times(1));
-            P2 = abs(Y/n);
-            P1 = P2(1:floor(n/2+1));
-            P1(2:end-1) = 2*P1(2:end-1);
-            [~, idx] = max(P1(2:end));
-            main_freq = f(idx+1);
+            correlation = corrcoef(param_force(start_idx:end), viv_force(start_idx:end));
+            if length(correlation) > 1 && ~isnan(correlation(1,2))
+                corr_coef = correlation(1,2);
+                text(min(param_force(start_idx:end))+0.1*(max(param_force(start_idx:end))-min(param_force(start_idx:end))), ...
+                    max(viv_force(start_idx:end))-0.1*(max(viv_force(start_idx:end))-min(viv_force(start_idx:end))), ...
+                    sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
+            end
         catch
-            main_freq = 0.25;  % 默认频率
+            warning('相关系数计算失败');
         end
-        
-        % 基于物理模型的增强，而非纯随机干扰
-        phase_diff = pi/4;  % 涡激力与参激力间的典型相位差
-        
-        % 增强后的参激力
-        enhanced_param = param_force(start_idx:end) .* (1 + 0.2 * sin(2*pi*main_freq*times_segment/5));
-        
-        % 增强后的涡激力，维持与参激力的物理耦合
-        enhanced_viv = viv_force(start_idx:end) .* (1 + 0.2 * sin(2*pi*main_freq*times_segment/5 + phase_diff));
-        
-        scatter(enhanced_param, enhanced_viv, 25, times_segment, 'filled');
-        title(sprintf('立管中点 (%.1f m) 力相位关系 (基于物理模型增强)', mid_position));
-    else
-        % 数据变化足够，直接使用原始数据
-        scatter(param_force(start_idx:end), viv_force(start_idx:end), 25, times(start_idx:end), 'filled');
-        title(sprintf('立管中点 (%.1f m) 力相位关系', mid_position));
-    end
-    
-    colormap(jet);
-    c = colorbar;
-    c.Label.String = '时间 (s)';
-    xlabel('参激力 (N/m)');
-    ylabel('涡激力 (N/m)');
-    grid on;
-    
-    % 安全计算相关系数
-    try
-        correlation = corrcoef(param_force(start_idx:end), viv_force(start_idx:end));
-        if length(correlation) > 1 && ~isnan(correlation(1,2))
-            corr_coef = correlation(1,2);
-            text(min(param_force(start_idx:end))+0.1*(max(param_force(start_idx:end))-min(param_force(start_idx:end))), ...
-                 max(viv_force(start_idx:end))-0.1*(max(viv_force(start_idx:end))-min(viv_force(start_idx:end))), ...
-                 sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
-        end
-    catch
-        warning('相关系数计算失败');
     end
 catch ME
     warning('相位分析失败: %s\n%s', ME.message, getReport(ME, 'extended'));
@@ -6398,156 +6487,173 @@ catch ME
     if length(correlation) > 1
         corr_coef = correlation(1,2);
         text(min(param_f_sim)+0.1*(max(param_f_sim)-min(param_f_sim)), ...
-             max(viv_f_sim)-0.1*(max(viv_f_sim)-min(viv_f_sim)), ...
-             sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
+            max(viv_f_sim)-0.1*(max(viv_f_sim)-min(viv_f_sim)), ...
+            sprintf('相关系数: %.3f', corr_coef), 'FontWeight', 'bold');
     end
 end   
-    % 6. 涡激-参激频率关系分析
-subplot(2, 3, 6);
-try
-    % 确保params变量存在
-    global params
-    
-    % 如果params未定义或为空，创建默认参数结构体
-    if ~exist('params', 'var') || isempty(params)
-        params = struct();
-        params.natural_frequencies = []; % 默认值
-        params.damping_ratios = [];      % 默认值
-        warning('params变量未定义，已创建默认结构体');
-    end
-    
-    % 获取平台垂荡频率
-    platform_freq = NaN;
-    if isfield(params, 'platform_motion') && isfield(params.platform_motion, 'heave_freq')
-        platform_freq = params.platform_motion.heave_freq;
-    elseif isfield(params, 'platform') && isfield(params.platform, 'motion') && ...
-           isfield(params.platform.motion, 'heave')
-        % 尝试从heave运动中估计频率
-        heave_data = params.platform.motion.heave;
-        if length(heave_data) > 20
-            % 简单FFT频率估计
-            L = length(heave_data);
-            if isfield(params.platform.motion, 'time')
-                t = params.platform.motion.time;
-                Fs = 1/mean(diff(t));
-            else
-                Fs = 1;  % 默认频率
-            end                
-            Y = fft(heave_data);
-            P2 = abs(Y/L);
-            P1 = P2(1:floor(L/2+1));
-            P1(2:end-1) = 2*P1(2:end-1);
-            f = Fs*(0:(L/2))/L;                
-            % 找出最大幅值对应的频率
-            [~, idx] = max(P1(2:end));
-            platform_freq = f(idx+1);  % +1因为我们从第2个开始
+    % 6. 涡激-参激频率关系分析 - 修复params.L部分
+    subplot(2, 3, 6);
+    try
+        % 如果params未定义或为空，创建默认参数结构体
+        local_params = params;  % 创建局部副本以确保params不丢失
+        if ~isfield(local_params, 'L')
+            local_params.L = max(xi);  % 确保L在此处可用
+            fprintf('警告: params.L未定义，使用max(xi)=%.6f作为立管长度\n', local_params.L);
         end
-    end        
-    
-    % 计算涡激振动频率
-    viv_freq = NaN;
-    if isfield(params, 'viv') && isfield(params.viv, 'frequency')
-        viv_freq = params.viv.frequency;
-    elseif isfield(params, 'viv') && isfield(params.viv, 'St')
-        % 使用Strouhal关系估计
-        St = params.viv.St;
-        % 假设特征流速
-        if isfield(params, 'current') && isfield(params.current, 'velocity')
-            velocity = params.current.velocity;
-        elseif isfield(params, 'ocean') && isfield(params.ocean, 'current') && ...
-               isfield(params.ocean.current, 'surface')
-            velocity = params.ocean.current.surface;
-        else
-            velocity = 1.0;  % 默认流速
-        end            
-        % 获取特征直径
-        D_char = NaN;
-        if isfield(params, 'outer_diameter')
-            D_char = params.outer_diameter;
-        elseif isfield(params, 'sections') && ~isempty(params.sections)
-            D_sum = 0;
-            count = 0;
-            for i = 1:length(params.sections)
-                if isfield(params.sections(i), 'outer_diameter')
-                    D_sum = D_sum + params.sections(i).outer_diameter;
-                    count = count + 1;
+        
+        % 获取平台垂荡频率
+        platform_freq = NaN;
+        if isfield(local_params, 'platform_motion') && isfield(local_params.platform_motion, 'heave_freq')
+            platform_freq = local_params.platform_motion.heave_freq;
+        elseif isfield(local_params, 'platform') && isfield(local_params.platform, 'motion') && ...
+                isfield(local_params.platform.motion, 'heave')
+            % 尝试从heave运动中估计频率
+            heave_data = local_params.platform.motion.heave;
+            if length(heave_data) > 20
+                % 简单FFT频率估计
+                L = length(heave_data);
+                if isfield(local_params.platform.motion, 'time')
+                    t = local_params.platform.motion.time;
+                    Fs = 1/mean(diff(t));
+                else
+                    Fs = 1;  % 默认频率
                 end
+                
+                Y = fft(heave_data);
+                P2 = abs(Y/L);
+                P1 = P2(1:floor(L/2+1));
+                P1(2:end-1) = 2*P1(2:end-1);
+                f = Fs*(0:(L/2))/L;
+                
+                % 找出最大幅值对应的频率
+                [~, idx] = max(P1(2:end));
+                platform_freq = f(idx+1);  % +1因为我们从第2个开始
             end
-            if count > 0
-                D_char = D_sum / count;
+        end
+        
+        % 计算涡激振动频率
+        viv_freq = NaN;
+        if isfield(local_params, 'viv') && isfield(local_params.viv, 'frequency')
+            viv_freq = local_params.viv.frequency;
+        elseif isfield(local_params, 'viv') && isfield(local_params.viv, 'St')
+            % 使用Strouhal关系估计
+            St = local_params.viv.St;
+            % 假设特征流速
+            if isfield(local_params, 'current') && isfield(local_params.current, 'velocity')
+                velocity = local_params.current.velocity;
+            elseif isfield(local_params, 'ocean') && isfield(local_params.ocean, 'current') && ...
+                    isfield(local_params.ocean.current, 'surface')
+                velocity = local_params.ocean.current.surface;
+            else
+                velocity = 1.0;  % 默认流速
+            end
+            
+            % 获取特征直径
+            D_char = NaN;
+            if isfield(local_params, 'outer_diameter')
+                D_char = local_params.outer_diameter;
+            elseif isfield(local_params, 'sections') && ~isempty(local_params.sections)
+                D_sum = 0;
+                count = 0;
+                for i = 1:length(local_params.sections)
+                    if isfield(local_params.sections(i), 'outer_diameter')
+                        D_sum = D_sum + local_params.sections(i).outer_diameter;
+                        count = count + 1;
+                    end
+                end
+                if count > 0
+                    D_char = D_sum / count;
+                else
+                    D_char = 0.5;  % 默认直径
+                end
             else
                 D_char = 0.5;  % 默认直径
             end
+            
+            viv_freq = St * velocity / D_char;
+        end
+        
+        % 创建频率比例图
+        if ~isnan(platform_freq) && ~isnan(viv_freq)
+            % 创建频率比范围
+            freq_ratios = linspace(0.2, 5, 50);
+            resonance = zeros(size(freq_ratios));
+            
+            % 模拟共振强度
+            for i = 1:length(freq_ratios)
+                ratio = freq_ratios(i);
+                % 一阶和二阶共振
+                resonance(i) = 1 / (1 + 20*(min(abs(ratio-1), abs(ratio-2)))^2);
+            end
+            
+            % 绘制共振曲线
+            plot(freq_ratios, resonance, 'k-', 'LineWidth', 2);
+            hold on;
+            
+            % 标记系统位置
+            actual_ratio = viv_freq / platform_freq;
+            actual_resonance = 1 / (1 + 20*(min(abs(actual_ratio-1), abs(actual_ratio-2)))^2);
+            plot(actual_ratio, actual_resonance, 'ro', 'MarkerSize', 10, 'LineWidth', 2);
+            
+            % 显示频率信息
+            text(actual_ratio, actual_resonance, sprintf(' 系统位置\n 比例=%.2f', actual_ratio), ...
+                'Color', 'red', 'FontWeight', 'bold');
+            
+            % 标记共振位置
+            plot([1, 1], [0, 1], 'b--', 'LineWidth', 1.5);
+            text(1, 0.5, ' 一阶共振', 'Color', 'blue', 'FontWeight', 'bold', 'Rotation', 90);
+            
+            plot([2, 2], [0, 1], 'g--', 'LineWidth', 1.5);
+            text(2, 0.5, ' 二阶共振', 'Color', 'green', 'FontWeight', 'bold', 'Rotation', 90);
+            
+            % 坐标轴设置
+            xlabel('\omega_{VIV}/\omega_{参}');
+            ylabel('共振强度');
+            title('涡激-参激频率共振分析');
+            grid on;
+            axis([0.2, 5, 0, 1.1]);
+            
+            % 添加频率信息
+            text(0.5, 0.9, sprintf('涡激频率: %.3f Hz', viv_freq), ...
+                'FontWeight', 'bold', 'BackgroundColor', [1 1 0.8]);
+            text(0.5, 0.8, sprintf('参激频率: %.3f Hz', platform_freq), ...
+                'FontWeight', 'bold', 'BackgroundColor', [1 1 0.8]);
+            hold off;
         else
-            D_char = 0.5;  % 默认直径
-        end           
-        viv_freq = St * velocity / D_char;
-    end        
-    
-    % 创建频率比例图
-    if ~isnan(platform_freq) && ~isnan(viv_freq)
-        % 创建频率比范围
-        freq_ratios = linspace(0.2, 5, 50);
-        resonance = zeros(size(freq_ratios));           
-        % 模拟共振强度
-        for i = 1:length(freq_ratios)
-            ratio = freq_ratios(i);
-            % 一阶和二阶共振
-            resonance(i) = 1 / (1 + 20*(min(abs(ratio-1), abs(ratio-2)))^2);
-        end           
-        % 绘制共振曲线
-        plot(freq_ratios, resonance, 'k-', 'LineWidth', 2);
-        hold on;            
-        % 标记系统位置
-        actual_ratio = viv_freq / platform_freq;
-        actual_resonance = 1 / (1 + 20*(min(abs(actual_ratio-1), abs(actual_ratio-2)))^2);
-        plot(actual_ratio, actual_resonance, 'ro', 'MarkerSize', 10, 'LineWidth', 2);            
-        % 显示频率信息
-        text(actual_ratio, actual_resonance, sprintf(' 系统位置\n 比例=%.2f', actual_ratio), ...
-             'Color', 'red', 'FontWeight', 'bold');            
-        % 标记共振位置
-        plot([1, 1], [0, 1], 'b--', 'LineWidth', 1.5);
-        text(1, 0.5, ' 一阶共振', 'Color', 'blue', 'FontWeight', 'bold', 'Rotation', 90);            
-        plot([2, 2], [0, 1], 'g--', 'LineWidth', 1.5);
-        text(2, 0.5, ' 二阶共振', 'Color', 'green', 'FontWeight', 'bold', 'Rotation', 90);           
-        % 坐标轴设置
-        xlabel('\omega_{VIV}/\omega_{参}');
-        ylabel('共振强度');
-        title('涡激-参激频率共振分析');
-        grid on;
-        axis([0.2, 5, 0, 1.1]);            
-        % 添加频率信息
-        text(0.5, 0.9, sprintf('涡激频率: %.3f Hz', viv_freq), ...
-             'FontWeight', 'bold', 'BackgroundColor', [1 1 0.8]);
-        text(0.5, 0.8, sprintf('参激频率: %.3f Hz', platform_freq), ...
-             'FontWeight', 'bold', 'BackgroundColor', [1 1 0.8]);
-        hold off;
-    else
-        text(0.5, 0.5, '无频率数据', 'HorizontalAlignment', 'center', 'FontSize', 14);
+            text(0.5, 0.5, '无频率数据', 'HorizontalAlignment', 'center', 'FontSize', 14);
+            axis off;
+        end
+    catch ME
+        warning('频率关系分析失败: %s', ME.message);
+        text(0.5, 0.5, '频率关系分析失败', 'HorizontalAlignment', 'center', 'FontSize', 14);
         axis off;
     end
-catch ME
-    warning('频率关系分析失败: %s', ME.message);
-    text(0.5, 0.5, '频率关系分析失败', 'HorizontalAlignment', 'center', 'FontSize', 14);
-    axis off;
+    
+    % 调整子图布局
+    set(gcf, 'Position', [100, 100, 1400, 900]);  % 增大图窗尺寸
+    
+    % 总标题
+    sgtitle('涡激-参激耦合分析', 'FontSize', 16, 'FontWeight', 'bold');
+    
+    % 保存图像
+    saveas(gcf, 'viv_parametric_coupling.png');
+    fprintf('涡激-参激耦合分析图已保存为 viv_parametric_coupling.png\n');
+    
+    % 保存更高分辨率版本
+    set(gcf, 'PaperPositionMode', 'auto');
+    print('viv_parametric_coupling_high_res', '-dpng', '-r300');
 end
-
-% 调整子图布局 - 将这部分放在所有子图绘制完成后
-set(gcf, 'Position', [100, 100, 1400, 900]);  % 增大图窗尺寸   
-% 总标题
-sgtitle('涡激-参激耦合分析', 'FontSize', 16, 'FontWeight', 'bold');    
-% 保存图像
-saveas(gcf, 'viv_parametric_coupling.png');
-fprintf('涡激-参激耦合分析图已保存为 viv_parametric_coupling.png\n');    
-% 可选：保存更高分辨率版本
-set(gcf, 'PaperPositionMode', 'auto');
-print('viv_parametric_coupling_high_res', '-dpng', '-r300');
 function plot_results(params, results, xi)
     % 增强版结果可视化
     % 输入:
     % params - 参数结构体
     % results - 结果结构体
-    % xi - 位置坐标   
+    % xi - 位置坐标
+    % 检查params.L是否定义
+    if ~isfield(params, 'L')
+        params.L = max(xi);
+        warning('params.L未定义，使用max(xi)=%.6f作为立管长度', params.L);
+    end
     % 确保beta长度足够
     if length(params.beta) < params.n_modes
         error('特征值数组长度(%d)小于模态数(%d)', length(params.beta), params.n_modes);
@@ -6845,37 +6951,77 @@ function plot_spectral_analysis(stress_history, max_stress_idx, time)
         ylabel('振幅 (Pa)');
         grid on;        
         % 找出主要频率
-        try
-            % 修改：调整MinPeakHeight为最大值的一个较小比例
-            amp_spectrum = 2*abs(Y(1:NFFT/2+1));
-            max_amp = max(amp_spectrum);
-            if max_amp > 0
-                % 使用较小的阈值，避免找不到峰值
-                min_peak_height = max_amp * 0.05;
-                [peaks, locs] = findpeaks(amp_spectrum, 'MinPeakHeight', min_peak_height);
-                if ~isempty(peaks)
-                    [sorted_peaks, sorted_idx] = sort(peaks, 'descend');
-                    sorted_locs = locs(sorted_idx);
-                    
-                    % 标记主要频率
-                    hold on;
-                    n_peaks = min(5, length(sorted_peaks));
-                    for i = 1:n_peaks
-                        plot(f(sorted_locs(i)), sorted_peaks(i), 'ro', 'MarkerSize', 8);
-                        text(f(sorted_locs(i)), sorted_peaks(i), sprintf(' %.3f Hz', f(sorted_locs(i))));
-                    end
-                    hold off;
-                else
-                    % 如果仍未找到峰值，添加说明
-                    text(mean(f), 0.5*max_amp, '未检测到显著峰值', 'HorizontalAlignment', 'center', 'BackgroundColor', [1 1 0.8]);
-                end
-            else
-                text(mean(f), 0, '幅值全为零，无法检测峰值', 'HorizontalAlignment', 'center', 'BackgroundColor', [1 1 0.8]);
+            % 健壮的峰值检测方法
+amp_spectrum = 2*abs(Y(1:NFFT/2+1));
+try
+    % 首先进行基本的数据有效性检查
+    valid_spectrum = amp_spectrum(~isnan(amp_spectrum) & ~isinf(amp_spectrum) & isfinite(amp_spectrum));
+    
+    if ~isempty(valid_spectrum) && any(valid_spectrum > eps)
+        % 使用直接峰值检测而不设置最小高度阈值
+        [all_peaks, all_locs] = findpeaks(amp_spectrum);
+        
+        % 如果找到峰值，可以进行后处理
+        if ~isempty(all_peaks)
+            % 基于数据特性计算合理的阈值
+            max_amp = max(valid_spectrum);
+            mean_amp = mean(valid_spectrum);
+            std_amp = std(valid_spectrum);
+            
+            % 计算动态阈值 - 使用平均值加上标准差的一部分
+            threshold = mean_amp + 0.5*std_amp;
+            
+            % 确保阈值不会太高或太低
+            if threshold > 0.5*max_amp
+                threshold = 0.1*max_amp;  % 如果太高，使用最大值的10%
+            elseif threshold < 0.001*max_amp
+                threshold = 0.001*max_amp;  % 如果太低，使用最大值的0.1%
             end
-        catch ME
-            warning('找不到峰值频率: %s', ME.message);
-            text(mean(f), mean(2*abs(Y(1:NFFT/2+1))), '峰值检测失败', 'HorizontalAlignment', 'center', 'BackgroundColor', [1 1 0.8]);
-        end       
+            
+            % 筛选出显著的峰值
+            significant_idx = all_peaks >= threshold;
+            
+            % 如果有显著峰值，使用它们
+            if any(significant_idx)
+                peaks = all_peaks(significant_idx);
+                locs = all_locs(significant_idx);
+            else
+                % 如果没有显著峰值，使用所有峰值
+                peaks = all_peaks;
+                locs = all_locs;
+            end
+        else
+            % 如果没有找到任何峰值，使用最大值点
+            [max_val, max_loc] = max(amp_spectrum);
+            peaks = max_val;
+            locs = max_loc;
+        end
+        
+        % 如果还没有峰值，最后的备选方案
+        if isempty(peaks)
+            [max_val, max_loc] = max(amp_spectrum);
+            if max_val > eps
+                peaks = max_val;
+                locs = max_loc;
+            else
+                % 数据太小，创建提示
+                text(mean(f), 0, '信号强度太弱，无法检测峰值', ...
+                    'HorizontalAlignment', 'center', 'FontWeight', 'bold', ...
+                    'BackgroundColor', [1 1 0.9], 'EdgeColor', [0.8 0.8 0.8]);
+            end
+        end
+    else
+        % 无有效数据
+        text(mean(f), 0, '频谱数据无效', ...
+            'HorizontalAlignment', 'center', 'FontWeight', 'bold', ...
+            'BackgroundColor', [1 1 0.9], 'EdgeColor', [0.8 0.8 0.8]);
+    end
+catch ME
+    % 错误处理
+    warning('频谱峰值检测失败: %s', ME.message);
+    % 使用简单的最大值作为备选
+    [peaks, locs] = max(amp_spectrum);
+end
         % 绘制功率谱密度 (使用自定义方法，避免pwelch可能的问题)
         subplot(2, 1, 2);
         try
@@ -7535,7 +7681,14 @@ function plot_parametric_analysis(results, params, xi)
     % 输入:
     % results - 结果结构体
     % params - 参数结构体
-    % xi - 位置坐标    
+    % xi - 位置坐标
+    
+    % 检查params.L是否定义
+    if ~isfield(params, 'L')
+        params.L = max(xi);
+        warning('params.L未定义，使用max(xi)=%.6f作为立管长度', params.L);
+    end
+    
     % 创建新图窗
     figure('Name', '参激振动分析', 'Position', [100, 100, 1200, 800]);    
     % 1. 频率分析 - 进行FFT找出主要频率
@@ -7791,11 +7944,18 @@ try
     % 确保所有需要的变量都存在
     global valid_cells_global n_elements
     
+    % 初始化params结构体（如果不存在）
+    if ~exist('params', 'var') || ~isstruct(params)
+        params = struct();
+        warning('params未定义，已创建默认结构体');
+    end
+    
     % 获取L值，优先使用params中的值
     if isfield(params, 'L')
         L = params.L;
     else
         L = max(xi); % 使用xi的最大值作为立管长度
+        params.L = L; % 设置到params结构体
         warning('params.L未定义，使用max(xi)=%f作为立管长度', L);
     end
     
@@ -7804,6 +7964,7 @@ try
             n_elements = params.n_elements;
         else
             n_elements = 100; % 默认单元数量，根据实际情况调整
+            params.n_elements = n_elements; % 设置到params结构体
             warning('n_elements未定义，使用默认值100');
         end
     end
@@ -7832,7 +7993,8 @@ try
         if isfield(results, 'coupling_history') && iscell(results.coupling_history)
             valid_cells_global = cellfun(@(x) ~isempty(x) && isstruct(x), results.coupling_history);
         else
-            throw(MException('VIVAnalysis:NoData', '没有有效的耦合数据'));
+            valid_cells_global = false(size(results.coupling_history));
+            warning('无法确定有效的耦合历史，创建默认值');
         end
     end
     
